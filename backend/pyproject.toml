@@ -1,0 +1,41 @@
+[project]
+name = "brand-dna-platform"
+version = "0.1.0"
+description = "Multi-tenant Brand DNA & Creative Intelligence Platform — backend API, workers, MCP server"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "sqlalchemy>=2.0.30",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.13",
+  "pgvector>=0.3",
+  "pydantic>=2.8",
+  "pydantic-settings>=2.4",
+  "email-validator>=2.2",
+  "argon2-cffi>=23.1",
+  "pyjwt>=2.9",
+  "python-multipart>=0.0.9",
+  "httpx>=0.27",
+  "boto3>=1.34",
+  "pillow>=10.4",
+  "numpy>=1.26",
+  "opencv-python-headless>=4.10",
+  "scenedetect>=0.6.4",
+  "pymupdf>=1.24",
+  "pyyaml>=6.0",
+  "cryptography>=43",
+  "trimesh>=4.4",
+  "mcp>=2.2",
+]
+
+[project.optional-dependencies]
+# Docling pulls in PyTorch + model downloads. It is optional: when installed,
+# the document pipeline prefers it; otherwise PyMuPDF (+ Tesseract OCR) is used.
+docling = ["docling>=2.0"]
+dev = ["pytest>=8", "pytest-timeout>=2.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300
+filterwarnings = ["ignore::DeprecationWarning"]
