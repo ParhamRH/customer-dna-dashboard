@@ -441,12 +441,14 @@ class DevVisualEmbedder:
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         feats = []
-        hist = cv2.calcHist([hsv], [0, 1, 2], None, [12, 4, 3], [0, 180, 0, 256, 0, 256]).flatten()
-        feats.append(np.sqrt(hist / (hist.sum() + 1e-9)) * 1.2)  # 144
+        hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 3, 3], [0, 180, 0, 256, 0, 256]).flatten()
+        feats.append(np.sqrt(hist / (hist.sum() + 1e-9)) * 1.0)  # 72: colour distribution
         lab = cv2.cvtColor(rgb.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
         small = cv2.resize(lab, (4, 4), interpolation=cv2.INTER_AREA).reshape(-1)
-        feats.append(small / np.array([100.0, 128.0, 128.0] * 16) * 0.8)  # 48
+        feats.append(small / np.array([100.0, 128.0, 128.0] * 16) * 0.9)  # 48: colour layout
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        g8 = cv2.resize(gray, (8, 8), interpolation=cv2.INTER_AREA).astype(np.float32).reshape(-1)
+        feats.append((g8 - g8.mean()) / (g8.std() + 1e-6) * 0.12)  # 64: luminance layout / composition
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0)
         gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1)
         mag, ang = cv2.cartToPolar(gx, gy, angleInDegrees=True)
@@ -456,10 +458,10 @@ class DevVisualEmbedder:
             for qx in (slice(0, w // 2), slice(w // 2, w)):
                 hq, _ = np.histogram(ang[qy, qx] % 180, bins=8, range=(0, 180), weights=mag[qy, qx])
                 quads.append(np.sqrt(hq / (hq.sum() + 1e-9)))
-        feats.append(np.concatenate(quads) * 0.7)  # 32
+        feats.append(np.concatenate(quads) * 0.6)  # 32: edge orientation per quadrant
         lap = cv2.Laplacian(gray, cv2.CV_32F)
         tex, _ = np.histogram(np.abs(lap), bins=16, range=(0, 64))
-        feats.append(np.sqrt(tex / (tex.sum() + 1e-9)) * 0.6)  # 16
+        feats.append(np.sqrt(tex / (tex.sum() + 1e-9)) * 0.5)  # 16: texture energy
         v = np.concatenate(feats)
         v = np.pad(v, (0, self.dimensions - len(v)))[: self.dimensions]
         n = np.linalg.norm(v)

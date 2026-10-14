@@ -332,6 +332,10 @@ def delete_token(token_id: uuid.UUID, tenant: TenantDep) -> None:
     tenant.db.delete(t)
 
 
+def _num(x: Any) -> str:
+    return str(int(x)) if isinstance(x, float) and x.is_integer() else str(x)
+
+
 def collect_tokens(db: Session, brand_id: uuid.UUID, approved_only: bool) -> list[dict[str, Any]]:
     """All tokens (design tokens + palette colors + typography) as flat DTCG-style records."""
     out: list[dict[str, Any]] = []
@@ -346,8 +350,8 @@ def collect_tokens(db: Session, brand_id: uuid.UUID, approved_only: bool) -> lis
         for lvl in t["hierarchy"]:
             lv = re.sub(r"[^a-z0-9]+", "-", str(lvl["level"]).lower())
             out.append({"path": f"typography.{lv}", "type": "typography", "value": {
-                "fontFamily": f"{{font.family.{slug}}}", "fontSize": f"{lvl['size_px']}px", "lineHeight": lvl["line_height"],
-                "fontWeight": lvl["weight"], "letterSpacing": f"{lvl.get('letter_spacing_em', 0)}em"}, "description": lvl.get("usage")})
+                "fontFamily": f"{{font.family.{slug}}}", "fontSize": f"{_num(lvl['size_px'])}px", "lineHeight": lvl["line_height"],
+                "fontWeight": lvl["weight"], "letterSpacing": f"{_num(lvl.get('letter_spacing_em', 0))}em"}, "description": lvl.get("usage")})
     q = select(DesignToken).where(DesignToken.brand_id == brand_id)
     if approved_only:
         q = q.where(DesignToken.status == "approved")

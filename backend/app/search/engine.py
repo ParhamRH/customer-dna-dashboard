@@ -34,11 +34,13 @@ from app.models import (
     Relationship,
 )
 from app.search.query_parser import ParsedQuery, or_query, parse
-from app.services.embeddings import vec_literal
+from app.services.embeddings import as_floats, vec_literal
 
 RRF_K = 60
 WEIGHTS = {"keyword": 1.0, "semantic": 1.25, "relationship": 1.1, "metadata": 0.7, "visual": 1.25}
-STATUS_WEIGHT = {"official": 1.0, "inspiration": 0.88, "external": 0.85, "pending": 0.75, "historical": 0.6}
+# Approval-aware ranking is a *mild* preference: official knowledge wins ties, it never
+# outranks a clearly more relevant item. Use scope="official" to exclude non-approved content.
+STATUS_WEIGHT = {"official": 1.0, "inspiration": 0.99, "external": 0.99, "pending": 0.985, "historical": 0.9}
 ENTITY_TYPES = ("asset", "principle", "guideline", "aesthetic_concept", "knowledge_entry", "project", "collection")
 
 MODELS = {
@@ -228,10 +230,13 @@ def visual_hits(db: Session, req: SearchRequest, vector: list[float], model: str
 
 # --- Fusion & hydration --------------------------------------------------------------------------
 def _fuse(lists: dict[str, list[tuple[str, uuid.UUID, float]]], segs: dict[tuple[str, uuid.UUID], list[dict[str, Any]]]) -> dict[tuple[str, uuid.UUID], Candidate]:
+    """Hybrid fusion: per signal, half reciprocal-rank (robust across heterogeneous scorers) and half
+    max-normalised score (keeps genuine score gaps, e.g. an exact visual match)."""
     cands: dict[tuple[str, uuid.UUID], Candidate] = {}
     for signal, hits in lists.items():
         seen: set[tuple[str, uuid.UUID]] = set()
         rank = 0
+        top = max((h[2] for h in hits), default=0.0) or 1.0
         for etype, eid, score in hits:
             key = (etype, eid)
             if key in seen:
@@ -239,7 +244,8 @@ def _fuse(lists: dict[str, list[tuple[str, uuid.UUID, float]]], segs: dict[tuple
             seen.add(key)
             rank += 1
             c = cands.setdefault(key, Candidate(etype, eid))
-            c.signals[signal] = {"rank": rank, "score": round(score, 4)}
+            fused = 0.5 * (RRF_K + 1) / (RRF_K + rank) + 0.5 * max(0.0, score) / top
+            c.signals[signal] = {"rank": rank, "score": round(score, 4), "fused": round(fused, 4)}
     for key, s in segs.items():
         if key in cands:
             cands[key].matched_segments = s
@@ -362,7 +368,7 @@ def search(db: Session, org_id: uuid.UUID, req: SearchRequest, *, query_image: P
                 text("SELECT embedding FROM embeddings WHERE entity_type='asset' AND entity_id=:i AND modality='visual' AND model=:m ORDER BY segment LIMIT 1"),
                 {"i": example_asset_id, "m": embedder.model},
             ).first()
-            vec = list(row[0]) if row else None
+            vec = as_floats(row[0]) if row else None
         if vec is not None:
             lists["visual"] = visual_hits(db, req, vec, embedder.model, exclude=example_asset_id)
     cands = _fuse(lists, seg_matches)
@@ -389,7 +395,7 @@ def search(db: Session, org_id: uuid.UUID, req: SearchRequest, *, query_image: P
             continue
         if not _passes(c.entity_type, row, req, pq, tag_map):
             continue
-        fused = sum(WEIGHTS[s] / (RRF_K + v["rank"]) for s, v in c.signals.items())
+        fused = sum(WEIGHTS[s] * v["fused"] for s, v in c.signals.items())
         ks = _knowledge_status(c.entity_type, row)
         score = fused * STATUS_WEIGHT.get(ks, 0.7)
         results.append((score, c, row, ks))

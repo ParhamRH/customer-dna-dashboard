@@ -171,3 +171,6 @@ def _make_customer(client, platform_admin: Api, letter: str) -> Customer:
 @pytest.fixture(scope="session")
 def customers(client, platform_admin) -> dict[str, Customer]:
     return {letter: _make_customer(client, platform_admin, letter) for letter in ("A", "B", "C")}
+
+
+from tests.world import world  # noqa: E402,F401  (session fixture: populated search/context brand)

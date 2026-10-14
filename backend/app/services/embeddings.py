@@ -29,8 +29,17 @@ from app.models import (
 TEXT_ENTITY_TYPES = ("asset", "principle", "guideline", "aesthetic_concept", "knowledge_entry", "project", "collection", "asset_segment")
 
 
+def as_floats(v) -> list[float]:  # noqa: ANN001
+    """Vector from the DB may arrive as numpy array (ORM) or '[...]' text (raw SQL)."""
+    if isinstance(v, str):
+        return [float(x) for x in json.loads(v)]
+    return [float(x) for x in v]
+
+
 def vec_literal(v) -> str:  # noqa: ANN001
-    """pgvector text literal for a vector-like (list / numpy array)."""
+    """pgvector text literal for a vector-like (list / numpy array / text)."""
+    if isinstance(v, str):
+        return v
     return "[" + ",".join(f"{float(x):.7g}" for x in v) + "]"
 
 
