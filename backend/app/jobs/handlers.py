@@ -2,6 +2,7 @@
 ``organization.purge`` which by nature operates on a whole tenant via the privileged role."""
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import uuid
@@ -119,3 +120,131 @@ def noop(ctx: JobContext) -> dict[str, Any]:
     if (ctx.job.payload or {}).get("fail"):
         raise RuntimeError("requested failure")
     return {"ok": True, "id": str(uuid.uuid4())}
+
+
+# --- Exports / imports ---------------------------------------------------------------------------
+@handler("export.build")
+def export_build(ctx: JobContext) -> dict[str, Any]:
+    import datetime as dt
+    import hashlib
+    import shutil
+
+    from app.config import get_settings
+    from app.exports.exporter import ExportError, build_export
+    from app.models import ExportJob
+    from app.services.events import emit
+
+    store = TenantStorage(ctx.org_id)
+    with ctx.session() as db:
+        ej = db.scalar(select(ExportJob).where(ExportJob.id == ctx.job.entity_id))
+        if ej is None:
+            raise PermanentJobError("export job not found")
+        ej.status = "running"
+        mode, options = ej.mode, dict(ej.options or {})
+    try:
+        with ctx.session() as db:
+            archive, manifest = build_export(db, ctx.org_id, ctx.job.entity_id, mode, options, options.get("selection") or {})
+    except ExportError as e:
+        with ctx.session() as db:
+            ej = db.scalar(select(ExportJob).where(ExportJob.id == ctx.job.entity_id))
+            ej.status, ej.error = "failed", str(e)
+        raise PermanentJobError(str(e)) from e
+    try:
+        h = hashlib.sha256()
+        with archive.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        obj = store.put_file(store.export_key(ctx.job.entity_id), archive, "application/zip")
+        with ctx.session() as db:
+            ej = db.scalar(select(ExportJob).where(ExportJob.id == ctx.job.entity_id))
+            ej.status, ej.storage_uri, ej.size_bytes = "completed", obj.uri, obj.size
+            ej.archive_checksum, ej.file_count = h.hexdigest(), manifest["file_count"]
+            ej.manifest = {k: v for k, v in manifest.items() if k != "checksums"}
+            ej.completed_at = dt.datetime.now(dt.UTC)
+            ej.expires_at = ej.completed_at + dt.timedelta(days=get_settings().export_ttl_days)
+            db.add(AuditLog(organization_id=ctx.org_id, actor_type="system", action="export.completed", entity_type="export",
+                            entity_id=str(ej.id), details={"size": obj.size, "files": manifest["file_count"], "mode": mode}))
+            emit(db, ctx.org_id, "export.completed", {"export_id": str(ej.id), "size_bytes": obj.size})
+        return {"size_bytes": obj.size, "file_count": manifest["file_count"], "counts": manifest["counts"]}
+    finally:
+        shutil.rmtree(archive.parent, ignore_errors=True)
+
+
+def _import_stage(ctx: JobContext):
+    from app.exports import importer
+    from app.models import ImportJob
+
+    store = TenantStorage(ctx.org_id)
+    with ctx.session() as db:
+        ij = db.scalar(select(ImportJob).where(ImportJob.id == ctx.job.entity_id))
+        if ij is None:
+            raise PermanentJobError("import job not found")
+        key = store.key_for_uri(ij.staging_uri)
+    work = importer.stage_dir()
+    zpath = work / "import.zip"
+    store.download_to(key, zpath)
+    return importer, work, importer.safe_extract(zpath, work / "x")
+
+
+@handler("import.validate")
+def import_validate(ctx: JobContext) -> dict[str, Any]:
+    from app.exports.importer import ImportErrorReport
+    from app.models import ImportJob
+
+    try:
+        importer, work, root = _import_stage(ctx)
+    except ImportErrorReport as e:
+        with ctx.session() as db:
+            ij = db.scalar(select(ImportJob).where(ImportJob.id == ctx.job.entity_id))
+            ij.status, ij.report = "invalid", {"errors": e.errors}
+        return {"valid": False}
+    try:
+        with ctx.session() as db:
+            try:
+                preview = importer.validate(db, root)
+            except ImportErrorReport as e:
+                preview = {"errors": e.errors, "warnings": []}
+            ij = db.scalar(select(ImportJob).where(ImportJob.id == ctx.job.entity_id))
+            ij.preview = preview
+            ij.source_manifest = {k: v for k, v in (json.loads((root / "manifest.json").read_text()) if (root / "manifest.json").exists() else {}).items() if k != "checksums"}
+            ij.status = "invalid" if preview.get("errors") else "validated"
+            ij.report = {"errors": preview.get("errors", []), "warnings": preview.get("warnings", [])}
+        return {"valid": not preview.get("errors")}
+    finally:
+        importer.cleanup(work)
+
+
+@handler("import.commit")
+def import_commit(ctx: JobContext) -> dict[str, Any]:
+    from app.exports.importer import ImportErrorReport
+    from app.jobs.queue import enqueue
+    from app.models import ImportJob
+    from app.services.events import emit
+
+    importer, work, root = _import_stage(ctx)
+    try:
+        with ctx.session() as db:
+            ij = db.scalar(select(ImportJob).where(ImportJob.id == ctx.job.entity_id))
+            options = dict(ij.options or {})
+            ij.status = "committing"
+        try:
+            with ctx.session() as db:  # ONE transaction for the whole import
+                out = importer.commit(db, ctx.org_id, root, options, ctx.job.created_by)
+                ij = db.scalar(select(ImportJob).where(ImportJob.id == ctx.job.entity_id))
+                ij.status, ij.report, ij.id_map = "committed", out["report"], out["id_map"]
+                db.add(AuditLog(organization_id=ctx.org_id, actor_type="system", action="import.committed", entity_type="import",
+                                entity_id=str(ij.id), details={"created": out["report"]["created"]}))
+                emit(db, ctx.org_id, "import.committed", {"import_id": str(ij.id), "created": out["report"]["created"]})
+                if options.get("regenerate_embeddings", True):
+                    for b in out["report"]["target_brand_ids"]:
+                        enqueue(db, ctx.org_id, "brand.reindex", brand_id=uuid.UUID(b), entity_type="brand", entity_id=uuid.UUID(b),
+                                created_by=ctx.job.created_by, priority=140)
+            return out["report"]
+        except Exception as e:
+            errors = e.errors if isinstance(e, ImportErrorReport) else [f"{type(e).__name__}: {e}"]
+            with ctx.session() as db:
+                ij = db.scalar(select(ImportJob).where(ImportJob.id == ctx.job.entity_id))
+                ij.status, ij.report = "failed", {"errors": errors, "rolled_back": True}
+            raise PermanentJobError("; ".join(errors)[:2000]) from e
+    finally:
+        importer.cleanup(work)

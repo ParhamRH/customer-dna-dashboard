@@ -6,6 +6,8 @@ from app.api.v1 import (
     brands,
     collections,
     context,
+    exports,
+    integrations,
     jobs,
     knowledge,
     organizations,
@@ -18,6 +20,6 @@ from app.api.v1 import (
 
 router = APIRouter()
 for module in (auth, organizations, workspace, brands, assets, collections, jobs, search, review, knowledge,
-               visual_identity, projects, context):
+               visual_identity, projects, context, exports, integrations):
     router.include_router(module.router)
 router.include_router(assets.files_router)
