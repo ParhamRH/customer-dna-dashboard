@@ -1,9 +1,22 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, brands, organizations, workspace
+from app.api.v1 import (
+    assets,
+    auth,
+    brands,
+    collections,
+    jobs,
+    knowledge,
+    organizations,
+    projects,
+    review,
+    search,
+    visual_identity,
+    workspace,
+)
 
 router = APIRouter()
-router.include_router(auth.router)
-router.include_router(organizations.router)
-router.include_router(workspace.router)
-router.include_router(brands.router)
+for module in (auth, organizations, workspace, brands, assets, collections, jobs, search, review, knowledge,
+               visual_identity, projects):
+    router.include_router(module.router)
+router.include_router(assets.files_router)

@@ -44,9 +44,15 @@ BACKEND = Path(__file__).resolve().parents[1]
 
 
 def _migrate() -> None:
+    """Fresh schema every session: drop everything the owner role created, then migrate to head."""
+    from sqlalchemy import create_engine, text
+
+    eng = create_engine(os.environ["BDNA_DATABASE_OWNER_URL"])
+    with eng.begin() as c:
+        c.execute(text("DROP OWNED BY bdna_owner CASCADE"))
+    eng.dispose()
     cfg = Config(str(BACKEND / "alembic.ini"))
     cfg.set_main_option("script_location", str(BACKEND / "migrations"))
-    command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
 

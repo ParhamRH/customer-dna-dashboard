@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
     ai_request_timeout_seconds: float = 120.0
+    # Visual (image) embeddings: "dev" descriptor, or "http" = self-hosted CLIP/SigLIP-style service
+    # that accepts {"image_base64": "..."} and returns {"embedding": [...]}.
+    ai_visual_embedding_provider: str = "dev"
+    visual_embedding_url: str = ""
+    visual_embedding_model: str = "clip-http"
+    visual_embedding_dimensions: int = 512
+    # Cap on images sent to a vision model per asset (cost control)
+    ai_max_images_per_asset: int = 6
 
     # --- Media processing
     ffmpeg_binary: str = "ffmpeg"
