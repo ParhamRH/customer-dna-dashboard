@@ -28,11 +28,11 @@ if [ "$MODE" = compose ]; then
   set -a; [ -f .env ] && . ./.env; set +a
   DB="${BDNA_DB_NAME:-bdna}"
   docker compose exec -T postgres pg_dump -U postgres -d "$DB" -Fc > "$OUT/database.dump"
-  if [ "${BDNA_STORAGE_BACKEND:-s3}" = "s3" ] && [ -z "${BDNA_S3_ENDPOINT_URL:-}" ]; then
+  if [ "${BDNA_STORAGE_BACKEND:-local}" = "s3" ] && [ -z "${BDNA_S3_ENDPOINT_URL:-}" ]; then
     BUCKET="${BDNA_S3_BUCKET:-bdna-assets}"
     docker compose run --rm -T -v "$OUT:/backup" --entrypoint sh minio-init -c \
       "mc alias set local http://minio:9000 \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null && mc mirror --quiet local/$BUCKET /backup/storage"
-  elif [ "${BDNA_STORAGE_BACKEND:-s3}" = "local" ]; then
+  elif [ "${BDNA_STORAGE_BACKEND:-local}" = "local" ]; then
     docker compose run --rm -T -v "$OUT:/backup" --entrypoint sh api -c "cp -a /app/var/storage /backup/storage"
   else
     echo "external object storage (${BDNA_S3_ENDPOINT_URL}) — back it up with the provider's tools (e.g. R2/S3 bucket versioning or rclone)." | tee "$OUT/STORAGE-NOT-INCLUDED.txt"

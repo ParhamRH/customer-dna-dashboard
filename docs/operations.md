@@ -24,7 +24,7 @@ What starts:
 | Service | Purpose | Notes |
 |---|---|---|
 | `postgres` | PostgreSQL 17 + pgvector | First start runs `deploy/postgres/init-roles.sh` (roles, database, extensions) |
-| `minio` + `minio-init` | S3-compatible storage, private bucket | Replace with S3/R2 by setting `BDNA_S3_*` |
+| `minio` + `minio-init` | optional, `--profile minio` | Bundled S3-compatible store. MinIO no longer publishes free images on Docker Hub; prefer R2/S3 |
 | `migrate` | Alembic migrations, then `cli check` | One-shot; only service that gets the owner credentials |
 | `api` | FastAPI on :8000 (internal) | Health check `GET /health` |
 | `worker` | Background jobs | Scale with `docker compose up -d --scale worker=3` |
@@ -41,9 +41,9 @@ Set `BDNA_SITE_ADDRESS=brand.example.com`, map ports 80 and 443 (`BDNA_HTTP_PORT
 `https://brand.example.com`, `BDNA_CORS_ORIGINS=["https://brand.example.com"]` and
 `BDNA_COOKIE_SECURE=true`. Caddy obtains and renews the certificate.
 
-Signed URLs for the bundled MinIO point at `BDNA_S3_PUBLIC_ENDPOINT_URL` (default
-`http://localhost:9000`). In production either put MinIO behind its own TLS host name (e.g.
-`files.brand.example.com` → `minio:9000`) or use S3/R2.
+Files are stored on the `storage` Docker volume by default (`BDNA_STORAGE_BACKEND=local`) and
+served through `/v1/files/…` signed links. For production, prefer S3 or R2 (below), which keeps
+large media off the application host and gives you bucket versioning.
 
 ### Cloudflare R2 or Amazon S3
 

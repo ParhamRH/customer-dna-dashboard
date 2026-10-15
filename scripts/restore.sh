@@ -31,7 +31,7 @@ if [ "$MODE" = compose ]; then
   docker compose stop api worker mcp web >/dev/null 2>&1 || true
   docker compose exec -T postgres pg_restore -U postgres -d "$DB" --clean --if-exists --single-transaction --exit-on-error < "$SRC/database.dump"
   if [ -d "$SRC/storage" ]; then
-    if [ "${BDNA_STORAGE_BACKEND:-s3}" = "local" ]; then
+    if [ "${BDNA_STORAGE_BACKEND:-local}" = "local" ]; then
       docker compose run --rm -T -v "$SRC:/backup:ro" --entrypoint sh api -c "rm -rf /app/var/storage/* && cp -a /backup/storage/. /app/var/storage/"
     else
       BUCKET="${BDNA_S3_BUCKET:-bdna-assets}"
