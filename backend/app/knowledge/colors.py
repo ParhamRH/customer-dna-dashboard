@@ -34,19 +34,19 @@ def to_oklch(r: int, g: int, b: int) -> dict[str, float]:
     l_ = 0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb
     m_ = 0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb
     s_ = 0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb
-    l, m, s = (math.copysign(abs(x) ** (1 / 3), x) for x in (l_, m_, s_))
-    L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
-    a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
-    bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+    lc, mc, sc = (math.copysign(abs(x) ** (1 / 3), x) for x in (l_, m_, s_))  # cube roots (Oklab LMS)
+    L = 0.2104542553 * lc + 0.7936177850 * mc - 0.0040720468 * sc
+    a = 1.9779984951 * lc - 2.4285922050 * mc + 0.4505937099 * sc
+    bb = 0.0259040371 * lc + 0.7827717662 * mc - 0.8086757660 * sc
     C = math.hypot(a, bb)
     H = math.degrees(math.atan2(bb, a)) % 360 if C > 1e-6 else 0.0
     return {"l": round(L, 4), "c": round(C, 4), "h": round(H, 2), "css": f"oklch({L * 100:.2f}% {C:.4f} {H:.2f})"}
 
 
 def to_hsl(r: int, g: int, b: int) -> dict[str, float]:
-    h, l, s = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
-    return {"h": round(h * 360, 1), "s": round(s * 100, 1), "l": round(l * 100, 1),
-            "css": f"hsl({h * 360:.1f} {s * 100:.1f}% {l * 100:.1f}%)"}
+    h, light, s = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
+    return {"h": round(h * 360, 1), "s": round(s * 100, 1), "l": round(light * 100, 1),
+            "css": f"hsl({h * 360:.1f} {s * 100:.1f}% {light * 100:.1f}%)"}
 
 
 def to_cmyk(r: int, g: int, b: int) -> dict[str, float]:

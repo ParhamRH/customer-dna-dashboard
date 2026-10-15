@@ -330,7 +330,7 @@ def search(db: Session, org_id: uuid.UUID, req: SearchRequest, *, query_image: P
         if seg_ids:
             for s in db.scalars(select(AssetSegment).where(AssetSegment.id.in_(seg_ids))):
                 seg_parent[s.id] = s
-        for etype, eid, sim, segment, _ in sem:
+        for etype, eid, sim, _segment, _ in sem:
             if etype == "asset_segment":
                 s = seg_parent.get(eid)
                 if s is None:

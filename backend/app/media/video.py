@@ -98,17 +98,32 @@ class Scene:
         return self.end_s - self.start_s
 
 
-def detect_scenes(path: Path, duration_s: float, threshold: float = 27.0) -> list[Scene]:
-    from scenedetect import ContentDetector, detect
+def detect_scenes(path: Path, duration_s: float, adaptive_threshold: float = 3.0, min_content_val: float = 8.0) -> list[Scene]:
+    """Shot boundaries with PySceneDetect's AdaptiveDetector.
+
+    A fixed ContentDetector threshold (27) misses hard cuts between tonally similar shots — exactly
+    what calm, palette-disciplined brand films are made of (measured: cut scores of 15–20 against
+    ~0.1 within a shot). The adaptive detector compares each frame to a rolling average, so subtle
+    cuts register while camera moves (which raise the average gradually) do not.
+    """
+    from scenedetect import AdaptiveDetector, HistogramDetector, SceneManager, open_video
 
     try:
-        raw = detect(str(path), ContentDetector(threshold=threshold, min_scene_len=12))
+        # Two complementary signals, union of their cuts: the adaptive content detector (robust to
+        # camera motion) and a luma-histogram detector (catches cuts during fast pans, where the
+        # adaptive ratio stays low because every frame already differs from its neighbour).
+        v = open_video(str(path))
+        sm = SceneManager()
+        sm.add_detector(AdaptiveDetector(adaptive_threshold=adaptive_threshold, min_content_val=min_content_val, min_scene_len=12))
+        sm.add_detector(HistogramDetector(min_scene_len=12))
+        sm.detect_scenes(v)
+        raw = sm.get_scene_list()
     except Exception:  # noqa: BLE001
         raw = []
     if not raw:
         raw_pairs = [(0.0, duration_s)]
     else:
-        raw_pairs = [(a.get_seconds(), b.get_seconds()) for a, b in raw]
+        raw_pairs = [(float(a.seconds), float(b.seconds)) for a, b in raw]
     scenes = []
     for i, (a, b) in enumerate(raw_pairs):
         b = b or duration_s
@@ -140,25 +155,56 @@ def analyze_motion(path: Path, scenes: list[Scene], sample_fps: float = 4.0, max
     if total and total / step > max_samples:
         step = max(1, total // max_samples)
     samples: list[dict[str, float]] = []
-    prev = None
     idx = 0
+
+    def gray(frame: np.ndarray) -> np.ndarray:
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        scale = 240.0 / max(g.shape)
+        # INTER_AREA averages instead of sampling: fine texture stays temporally stable, so flow tracks it
+        return cv2.resize(g, (max(16, int(g.shape[1] * scale)), max(16, int(g.shape[0] * scale))), interpolation=cv2.INTER_AREA)
+
+    def flow(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        return cv2.calcOpticalFlowFarneback(a, b, None, 0.5, 4, 15, 3, 5, 1.2, 0)
+
+    def cut_between(i0: int, i1: int) -> bool:
+        return any(i0 / fps < sc.start_s <= i1 / fps + 1e-6 for sc in scenes if sc.start_s > 0)
+
+    # Two baselines per sampling point, because one cannot serve both slow and fast footage:
+    #  * short (anchor -> next frame): small displacement, so fast pans over repetitive structure
+    #    (façades, grids) cannot alias into a wrong-direction match;
+    #  * long (anchor -> next anchor, `step` frames): real slow motion accumulates over the gap while
+    #    encoder noise (sub-pixel "breathing" of a locked-off shot) does not, so slow, deliberate
+    #    camera moves rise above the noise floor once normalised per frame.
+    # The short baseline is used when it already shows ≥ 1 px of movement per frame.
+    anchor: tuple[int, np.ndarray] | None = None
+    nxt: tuple[int, np.ndarray] | None = None
     while True:
         ok = cap.grab()
         if not ok:
             break
-        if idx % step == 0:
+        is_anchor = idx % step == 0
+        is_next = step > 1 and idx % step == 1
+        if is_anchor or is_next:
             ok, frame = cap.retrieve()
             if not ok:
                 break
-            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            scale = 240.0 / max(g.shape)
-            g = cv2.resize(g, (max(16, int(g.shape[1] * scale)), max(16, int(g.shape[0] * scale))))
-            t_now, t_prev = idx / fps, (idx - step) / fps
-            crosses_cut = any(t_prev < sc.start_s <= t_now for sc in scenes if sc.start_s > 0)
-            if prev is not None and prev.shape == g.shape and not crosses_cut:
-                flow = cv2.calcOpticalFlowFarneback(prev, g, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                samples.append({"t": t_now, **_flow_features(flow, step)})
-            prev = g
+            g = gray(frame)
+            if is_next and anchor is not None:
+                nxt = (idx, g)
+            elif is_anchor:
+                if anchor is not None and anchor[1].shape == g.shape:
+                    a_idx, a = anchor
+                    chosen, t_mid = None, 0.0
+                    if nxt is not None and not cut_between(a_idx, nxt[0]):
+                        short = flow(a, nxt[1])
+                        if float(np.median(np.hypot(short[..., 0], short[..., 1]))) >= 1.0:
+                            chosen, t_mid = _flow_features(short, nxt[0] - a_idx), (a_idx + nxt[0]) / 2 / fps
+                    if chosen is None and not cut_between(a_idx, idx):
+                        chosen, t_mid = _flow_features(flow(a, g), idx - a_idx), (a_idx + idx) / 2 / fps
+                    if chosen is not None:
+                        # time-stamp the sample where it was measured, so it is attributed to the right scene
+                        samples.append({"t": t_mid, **chosen})
+                anchor, nxt = (idx, g), None
         idx += 1
     cap.release()
     if not samples:
@@ -174,7 +220,8 @@ def analyze_motion(path: Path, scenes: list[Scene], sample_fps: float = 4.0, max
         "samples": len(samples),
         "mean_motion": round(float(np.mean(mags)), 4),
         "motion_variability": round(float(np.std(mags)), 4),
-        "overall_camera_movement": _classify(samples)["camera_movement"],
+        "overall_camera_movement": _dominant_movement(scenes) or _classify(samples)["camera_movement"],
+        "camera_movements": sorted({sc.motion.get("camera_movement") for sc in scenes if sc.motion}),
         "pace": _pace(len(scenes), total_dur),
         "cuts_per_minute": round(60.0 * max(0, len(scenes) - 1) / total_dur, 2),
         "average_shot_length_s": round(total_dur / max(1, len(scenes)), 2),
@@ -201,23 +248,53 @@ def _flow_features(flow: np.ndarray, step: int) -> dict[str, float]:
     }
 
 
+def _dominant_movement(scenes: list[Scene]) -> str | None:
+    """Movement that covers the most screen time (scenes are classified individually)."""
+    weight: dict[str, float] = {}
+    for sc in scenes:
+        mv = (sc.motion or {}).get("camera_movement")
+        if mv:
+            weight[mv] = weight.get(mv, 0.0) + sc.duration_s
+    return max(weight, key=weight.get) if weight else None
+
+
+def _consistency(values: list[float]) -> float:
+    """Share of samples moving in the direction of the mean (1.0 = perfectly steady move)."""
+    mean = float(np.mean(values))
+    if abs(mean) < 1e-9:
+        return 0.0
+    return sum(1 for v in values if v * mean > 0) / len(values)
+
+
 def _classify(samples: list[dict[str, float]]) -> dict[str, Any]:
+    """Camera movement from dense flow. Moves are judged by *steadiness of direction*, not raw speed:
+    a deliberate slow push-in has small but consistently signed divergence, while handheld jitter has
+    flow that keeps changing sign. Thresholds are % of frame per source frame."""
     m = float(np.mean([s["magnitude"] for s in samples]))
-    dx = float(np.mean([s["dx"] for s in samples]))
-    dy = float(np.mean([s["dy"] for s in samples]))
-    div = float(np.mean([s["divergence"] for s in samples]))
-    curl = float(np.mean([s["curl"] for s in samples]))
-    jitter = float(np.std([s["dx"] for s in samples]) + np.std([s["dy"] for s in samples]))
-    speed = "static" if m < 0.08 else "slow" if m < 0.35 else "moderate" if m < 0.9 else "fast"
+    dxs, dys, divs = [s["dx"] for s in samples], [s["dy"] for s in samples], [s["divergence"] for s in samples]
+    dx, dy, div = float(np.mean(dxs)), float(np.mean(dys)), float(np.mean(divs))
+    curls = [s["curl"] for s in samples]
+    curl = float(np.mean(curls))
+    jitter = float(np.std(dxs) + np.std(dys))
+    steady = len(samples) >= 3
+    # zoom only when divergence is a real component, not the edge artefact of a strong pan/tilt
+    zoom = abs(div) >= 0.02 and steady and _consistency(divs) >= 0.8 and abs(div) >= 0.6 * max(abs(dx), abs(dy))
+    pan = abs(dx) >= 0.02 and steady and _consistency(dxs) >= 0.8 and abs(dx) >= abs(dy) and (not zoom or abs(dx) > 1.5 * abs(div))
+    tilt = abs(dy) >= 0.02 and steady and _consistency(dys) >= 0.8 and abs(dy) > abs(dx) * 0.6 and (not zoom or abs(dy) > 1.5 * abs(div))
+    coherent = zoom or pan or tilt
+    if m < 0.08:
+        speed = "slow" if coherent else "static"
+    else:
+        speed = "slow" if m < 0.35 else "moderate" if m < 0.9 else "fast"
     moves = []
     if speed != "static":
-        if abs(dx) > 0.06 and abs(dx) >= abs(dy):
+        if pan:
             moves.append("pan right" if dx < 0 else "pan left")  # scene moves left => camera pans right
-        if abs(dy) > 0.06 and abs(dy) > abs(dx) * 0.6:
+        if tilt:
             moves.append("tilt down" if dy < 0 else "tilt up")
-        if abs(div) > 0.05:
+        if zoom:
             moves.append("push in / zoom in" if div > 0 else "pull out / zoom out")
-        if abs(curl) > 0.12:
+        if abs(curl) > 0.12 and _consistency(curls) >= 0.8 and abs(curl) >= 0.6 * max(abs(dx), abs(dy)):
             moves.append("roll")
         if jitter > 0.25 and not moves:
             moves.append("handheld")
@@ -232,6 +309,7 @@ def _classify(samples: list[dict[str, float]]) -> dict[str, Any]:
         "tilt_y": round(dy, 4),
         "zoom": round(div, 4),
         "jitter": round(jitter, 4),
+        "steadiness": round(max(_consistency(dxs), _consistency(dys), _consistency(divs)), 3),
     }
 
 

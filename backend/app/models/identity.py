@@ -159,7 +159,13 @@ class AuditLog(Base):
     """Append-only. The app role may INSERT and SELECT, never UPDATE/DELETE (enforced by grants)."""
 
     __tablename__ = "audit_logs"
-    __table_args__ = (Index("ix_audit_logs_org_created", "organization_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_audit_logs_org_created", "organization_id", "created_at"),
+        # login throttling looks up recent failures by e-mail and by IP (migration 0003)
+        Index("ix_audit_logs_login_failed_email", func.lower(text("actor_label")), "created_at",
+              postgresql_where=text("action = 'auth.login_failed'")),
+        Index("ix_audit_logs_login_failed_ip", "ip_address", "created_at", postgresql_where=text("action = 'auth.login_failed'")),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     organization_id: Mapped[uuid.UUID | None] = mapped_column(

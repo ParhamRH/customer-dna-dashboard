@@ -1,0 +1,46 @@
+{
+  "name": "brand-dna-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Brand DNA & Creative Intelligence Platform — dashboard (Next.js)",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5",
+    "@fontsource-variable/newsreader": "^5",
+    "@fontsource-variable/schibsted-grotesk": "^5",
+    "@tanstack/react-query": "^5",
+    "class-variance-authority": "^0.7",
+    "clsx": "^2",
+    "d3-force": "^3",
+    "lucide-react": "*",
+    "next": "16.3.x",
+    "radix-ui": "^1",
+    "react": "^19",
+    "react-dom": "^19",
+    "react-markdown": "^10",
+    "remark-gfm": "^4",
+    "sonner": "^2",
+    "tailwind-merge": "^3",
+    "yaml": "^2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.0",
+    "@tailwindcss/postcss": "^4",
+    "@types/d3-force": "^3",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.x",
+    "tailwindcss": "^4",
+    "tw-animate-css": "^1",
+    "typescript": "~5.9"
+  }
+}

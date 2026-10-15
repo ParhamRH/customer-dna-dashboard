@@ -18,7 +18,9 @@ def get_collection(tenant, collection_id: uuid.UUID) -> Collection:  # noqa: ANN
 
 def add_assets(tenant, collection_id: uuid.UUID, asset_ids: list[uuid.UUID], note: str | None = None) -> int:  # noqa: ANN001
     c = get_collection(tenant, collection_id)
-    assets = tenant.db.scalars(select(Asset).where(Asset.id.in_(asset_ids), Asset.deleted_at.is_(None))).all()
+    found = {a.id: a for a in tenant.db.scalars(select(Asset).where(Asset.id.in_(asset_ids), Asset.deleted_at.is_(None)))}
+    # keep the order the caller chose (the order assets were picked), ignoring duplicates
+    assets = [found[i] for i in dict.fromkeys(asset_ids) if i in found]
     if any(a.brand_id != c.brand_id for a in assets):
         raise ValidationFailed("Assets must belong to the collection's brand")
     pos = tenant.db.scalar(select(func.coalesce(func.max(CollectionAsset.position), -1)).where(CollectionAsset.collection_id == c.id))

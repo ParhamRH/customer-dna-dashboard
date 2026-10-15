@@ -149,3 +149,38 @@ def test_audit_log_records_actions(customers):
     assert "member.added" in actions and "organization.created" in actions
     # Another customer's actions never appear
     assert all(i["details"].get("email", "").find(customers["B"].slug) == -1 for i in items)
+
+
+def test_failed_sign_ins_are_recorded_and_throttled(client, customers, monkeypatch):
+    """Failed attempts are audited (in their own transaction) and, past the limit, even the right
+    password is refused for that e-mail until the window passes; other accounts are unaffected."""
+    from sqlalchemy import func, select
+
+    from app.config import get_settings
+    from app.db.session import system_session
+    from app.models import AuditLog
+
+    cfg = get_settings()
+    monkeypatch.setattr(cfg, "login_max_failures_per_email", 3)
+    email = f"viewer@{customers['B'].slug}.test"
+    for _ in range(3):
+        assert client.post("/v1/auth/login", json={"email": email.upper(), "password": "wrong-password"}).status_code == 401
+    with system_session() as s:
+        n = s.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.action == "auth.login_failed", AuditLog.actor_label == email))
+    assert n == 3
+    r = client.post("/v1/auth/login", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
+    other = client.post("/v1/auth/login", json={"email": f"editor@{customers['B'].slug}.test", "password": PASSWORD})
+    assert other.status_code == 200
+    client.cookies.clear()
+    # once the failures fall outside the window the account works again (the audit log is
+    # append-only for the runtime roles, so the test ages the rows with the owner role)
+    from sqlalchemy import text
+
+    from app.db.session import owner_engine
+
+    with owner_engine().begin() as conn:
+        conn.execute(text("UPDATE audit_logs SET created_at = created_at - interval '1 hour' "
+                          "WHERE action = 'auth.login_failed' AND actor_label = :e"), {"e": email})
+    assert client.post("/v1/auth/login", json={"email": email, "password": PASSWORD}).status_code == 200
+    client.cookies.clear()

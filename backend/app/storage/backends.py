@@ -176,14 +176,23 @@ class S3Storage:
         if not s.s3_bucket:
             raise StorageError("BDNA_S3_BUCKET is required for the s3 storage backend")
         self.bucket = s.s3_bucket
-        self.client = boto3.client(
-            "s3",
-            endpoint_url=s.s3_endpoint_url or None,
-            region_name=s.s3_region,
-            aws_access_key_id=s.s3_access_key_id or None,
-            aws_secret_access_key=s.s3_secret_access_key or None,
-            config=Config(signature_version="s3v4", retries={"max_attempts": 5, "mode": "standard"}),
-        )
+
+        def make(endpoint: str | None):
+            return boto3.client(
+                "s3",
+                endpoint_url=endpoint or None,
+                region_name=s.s3_region,
+                aws_access_key_id=s.s3_access_key_id or None,
+                aws_secret_access_key=s.s3_secret_access_key or None,
+                config=Config(signature_version="s3v4", retries={"max_attempts": 5, "mode": "standard"},
+                              s3={"addressing_style": s.s3_addressing_style}),
+            )
+
+        self.client = make(s.s3_endpoint_url)
+        # Signed URLs embed the host in the signature, so they must be generated for the host the
+        # browser will actually use.
+        public = s.s3_public_endpoint_url.strip()
+        self.presigner = make(public) if public and public != s.s3_endpoint_url else self.client
 
     def _uri(self, key: str) -> str:
         return f"s3://{self.bucket}/{key}"
@@ -252,7 +261,7 @@ class S3Storage:
             params["ResponseContentDisposition"] = f"{disp}; filename*=UTF-8''{quote(filename)}"
         if content_type:
             params["ResponseContentType"] = content_type
-        return self.client.generate_presigned_url("get_object", Params=params, ExpiresIn=ttl)
+        return self.presigner.generate_presigned_url("get_object", Params=params, ExpiresIn=ttl)
 
 
 _backend: StorageBackend | None = None

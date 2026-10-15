@@ -29,6 +29,19 @@ dependencies = [
   "mcp>=2.2",
 ]
 
+[project.scripts]
+bdna = "app.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["py.typed"]
+
 [project.optional-dependencies]
 # Docling pulls in PyTorch + model downloads. It is optional: when installed,
 # the document pipeline prefers it; otherwise PyMuPDF (+ Tesseract OCR) is used.
@@ -37,5 +50,15 @@ dev = ["pytest>=8", "pytest-timeout>=2.3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 timeout = 300
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 240  # the codebase favours long, dense lines; formatting is not enforced
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I"]
+# B008: FastAPI's `Depends(...)` / `File(...)` defaults are the framework's intended pattern.
+ignore = ["B008"]

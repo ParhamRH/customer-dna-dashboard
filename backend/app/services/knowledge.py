@@ -299,9 +299,9 @@ def set_concept_relations(tenant, concept: AestheticConcept, related: list[uuid.
 
 
 def concept_detail(db: Session, c: AestheticConcept, org_id: uuid.UUID) -> dict[str, Any]:
+    from app.models import Asset
     from app.services.assets import load_summaries
     from app.services.graph import entity_relationships
-    from app.models import Asset
 
     rels = entity_relationships(db, "aesthetic_concept", c.id)
     out = row_to_dict(c)

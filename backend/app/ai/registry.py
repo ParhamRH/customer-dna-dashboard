@@ -7,6 +7,7 @@ then the development adapter. The resolved provider/model is recorded on every a
 from __future__ import annotations
 
 import base64
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -22,7 +23,9 @@ from app.ai.providers import AnthropicProvider, OpenAICompatibleProvider, OpenAI
 from app.config import get_settings
 from app.models import Integration
 from app.security.credentials import decrypt_secret
+from app.security.outbound import OutboundUrlError, check_outbound_url
 
+log = logging.getLogger("bdna.ai")
 
 def _org_override(db: Session | None, capability: str) -> tuple[dict[str, Any], str] | None:
     if db is None:
@@ -37,14 +40,25 @@ def _org_override(db: Session | None, capability: str) -> tuple[dict[str, Any], 
     return None
 
 
+def _override_key(key: str | None, base_url: str | None, platform_key: str) -> str:
+    """Platform API keys are only ever sent to the platform's configured endpoints. A workspace
+    override that points at its own base URL must bring its own key — otherwise a customer could
+    redirect requests (and the platform key) to a server they control."""
+    if base_url:
+        check_outbound_url(base_url)
+        return key or ""
+    return key or platform_key
+
+
 def _build_chat(provider: str, model: str | None, api_key: str, base_url: str | None):
+    """Provider for a workspace override (config from the `integrations` table)."""
     s = get_settings()
     if provider == "anthropic":
-        return AnthropicProvider(api_key or s.anthropic_api_key, model or s.anthropic_model, base_url or s.anthropic_base_url)
+        key = _override_key(api_key, base_url, s.anthropic_api_key)
+        return AnthropicProvider(key, model or s.anthropic_model, base_url or s.anthropic_base_url)
     if provider in ("openai", "openai_compatible"):
-        return OpenAICompatibleProvider(
-            api_key or s.openai_api_key, model or s.openai_vision_model, base_url or s.openai_base_url, name=provider
-        )
+        key = _override_key(api_key, base_url, s.openai_api_key)
+        return OpenAICompatibleProvider(key, model or s.openai_vision_model, base_url or s.openai_base_url, name=provider)
     return None
 
 
@@ -61,8 +75,8 @@ def vision_provider(db: Session | None = None):
             return AnthropicProvider(s.anthropic_api_key, s.anthropic_model)
         if s.ai_vision_provider in ("openai", "openai_compatible"):
             return OpenAICompatibleProvider(s.openai_api_key, s.openai_vision_model, s.openai_base_url, name=s.ai_vision_provider)
-    except ProviderError:
-        pass
+    except (ProviderError, OutboundUrlError) as e:
+        log.warning("AI provider override not usable, falling back: %s", e)
     return DevVisionProvider()
 
 
@@ -79,8 +93,8 @@ def text_provider(db: Session | None = None):
             return AnthropicProvider(s.anthropic_api_key, s.anthropic_model)
         if s.ai_text_provider in ("openai", "openai_compatible"):
             return OpenAICompatibleProvider(s.openai_api_key, s.openai_text_model, s.openai_base_url, name=s.ai_text_provider)
-    except ProviderError:
-        pass
+    except (ProviderError, OutboundUrlError) as e:
+        log.warning("AI provider override not usable, falling back: %s", e)
     return DevTextProvider()
 
 
@@ -91,9 +105,14 @@ def text_embedder(db: Session | None = None):
     if o:
         cfg, key = o
         if cfg.get("provider") in ("openai", "openai_compatible"):
+            try:
+                key = _override_key(key, cfg.get("base_url"), s.openai_api_key)
+            except OutboundUrlError as e:
+                # Never silently switch vector spaces: refuse instead of falling back.
+                raise ProviderError(f"embedding override not usable: {e}") from e
             return OpenAIEmbedder(
                 OpenAICompatibleProvider(
-                    key or s.openai_api_key, cfg.get("model") or s.openai_text_model,
+                    key, cfg.get("model") or s.openai_text_model,
                     cfg.get("base_url") or s.openai_base_url, name=cfg["provider"],
                     embedding_model=cfg.get("model") or s.openai_embedding_model,
                     embedding_dimensions=cfg.get("dimensions") or s.openai_embedding_dimensions,
@@ -143,15 +162,20 @@ def visual_embedder(db: Session | None = None):
 
 def describe(db: Session | None = None) -> dict[str, Any]:
     """Human-readable summary for the settings page."""
-    v, t, te, ve = vision_provider(db), text_provider(db), text_embedder(db), visual_embedder(db)
-    def info(p) -> dict[str, Any]:  # noqa: ANN001
+    def info(make) -> dict[str, Any]:  # noqa: ANN001
+        try:
+            p = make(db)
+        except ProviderError as e:
+            return {"provider": "unavailable", "model": None, "dimensions": None, "development_adapter": False, "error": str(e)}
         return {
             "provider": p.name,
             "model": getattr(p, "model", None),
             "dimensions": getattr(p, "dimensions", None),
             "development_adapter": p.name == "dev-heuristic",
         }
-    return {"vision": info(v), "text": info(t), "text_embedding": info(te), "visual_embedding": info(ve)}
+
+    return {"vision": info(vision_provider), "text": info(text_provider), "text_embedding": info(text_embedder),
+            "visual_embedding": info(visual_embedder)}
 
 
 _ = uuid

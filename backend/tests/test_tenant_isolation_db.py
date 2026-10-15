@@ -27,7 +27,7 @@ def test_no_context_sees_nothing(customers):
 
 def test_select_without_where_is_scoped(customers):
     ids = _ids(customers)
-    for letter, (org, brand) in ids.items():
+    for _letter, (org, brand) in ids.items():
         with tenant_session(TenantContext(org_id=org)) as db:
             brands = db.scalars(select(Brand)).all()
             assert {b.organization_id for b in brands} == {org}

@@ -65,6 +65,14 @@ def _trim(text: str | None, n: int) -> str:
     return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
+def _body(summary: str | None, text: str | None, n: int) -> str | None:
+    """The body, unless it only repeats the summary (common for short entries) — no duplicated lines in briefs."""
+    b = _trim(text, n)
+    if not b or " ".join(b.split()).casefold() == " ".join((summary or "").split()).casefold():
+        return None
+    return b
+
+
 def _matches_task(scope_types: list[str], template: dict[str, Any], project: Project | None) -> bool:
     if not scope_types:
         return True
@@ -155,7 +163,7 @@ def select_context(db: Session, org_id: uuid.UUID, req: ContextRequest) -> dict[
                 break
             entry_items.setdefault(d, []).append({
                 "source": _src(sources, "knowledge_entry", e, e["title"]), "type": e["entry_type"], "title": e["title"],
-                "summary": _trim(e.get("summary"), body), "body": _trim(e.get("body"), body) if req.mode != "compact" else None,
+                "summary": _trim(e.get("summary"), body), "body": _body(e.get("summary"), e.get("body"), body) if req.mode != "compact" else None,
                 "structured": e.get("structured") if req.mode != "compact" else None,
             })
             n += 1
@@ -176,7 +184,7 @@ def select_context(db: Session, org_id: uuid.UUID, req: ContextRequest) -> dict[
     guidelines = [g for g in data["guideline"] if g.get("domain_key") in domains
                   and _matches_task((g.get("applies_to") or {}).get("project_types", []), tpl, project)][: lim["guidelines"]]
     guideline_items = [{"source": _src(sources, "guideline", g, g["title"]), "title": g["title"], "domain": g["domain_key"],
-                        "summary": _trim(g.get("summary"), body), "body": _trim(g.get("body"), body if req.mode != "compact" else 200)}
+                        "summary": _trim(g.get("summary"), body), "body": _body(g.get("summary"), g.get("body"), body if req.mode != "compact" else 200)}
                        for g in guidelines]
 
     # Aesthetic concepts

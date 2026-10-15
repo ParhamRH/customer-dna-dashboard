@@ -43,6 +43,11 @@ class Conflict(ApiError):
     code = "conflict"
 
 
+class TooManyRequests(ApiError):
+    status_code = 429
+    code = "rate_limited"
+
+
 class ValidationFailed(ApiError):
     status_code = 422
     code = "validation_failed"

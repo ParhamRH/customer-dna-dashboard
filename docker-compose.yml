@@ -1,0 +1,216 @@
+# Brand DNA & Creative Intelligence Platform — full stack.
+#
+#   cp .env.example .env        # then set every value marked CHANGE-ME
+#   docker compose up -d --build
+#   docker compose run --rm api python -m app.cli create-admin --email you@example.com
+#   open http://localhost:8080
+#
+# Optional profiles:
+#   --profile automation   n8n for workflows triggered by platform webhooks
+#   --profile demo         loads three fictional demo customers once (development only)
+#
+# Services share one backend image (api, worker, mcp, migrate). Tenant isolation does not depend
+# on this file: the API, worker and MCP server connect as the RLS-enforced `bdna_app` role; only
+# narrowly scoped platform functions use `bdna_system`, and migrations use `bdna_owner`.
+
+x-backend-env: &backend-env
+  BDNA_ENVIRONMENT: ${BDNA_ENVIRONMENT:-production}
+  # Least privilege: long-running services never receive the superuser or owner credentials
+  # (they arrive via env_file otherwise). Only `migrate` gets the owner URL.
+  POSTGRES_PASSWORD: ""
+  BDNA_DB_OWNER_PASSWORD: ""
+  N8N_ENCRYPTION_KEY: ""
+  BDNA_DATABASE_OWNER_URL: ""
+  BDNA_DATABASE_APP_URL: postgresql+psycopg://bdna_app:${BDNA_DB_APP_PASSWORD}@postgres:5432/${BDNA_DB_NAME:-bdna}
+  BDNA_DATABASE_SYSTEM_URL: postgresql+psycopg://bdna_system:${BDNA_DB_SYSTEM_PASSWORD}@postgres:5432/${BDNA_DB_NAME:-bdna}
+  BDNA_STORAGE_BACKEND: ${BDNA_STORAGE_BACKEND:-s3}
+  BDNA_S3_BUCKET: ${BDNA_S3_BUCKET:-bdna-assets}
+  BDNA_S3_ENDPOINT_URL: ${BDNA_S3_ENDPOINT_URL:-http://minio:9000}
+  BDNA_S3_PUBLIC_ENDPOINT_URL: ${BDNA_S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+  BDNA_S3_ADDRESSING_STYLE: ${BDNA_S3_ADDRESSING_STYLE:-path}
+  BDNA_S3_REGION: ${BDNA_S3_REGION:-us-east-1}
+  BDNA_S3_ACCESS_KEY_ID: ${BDNA_S3_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-bdna}}
+  BDNA_S3_SECRET_ACCESS_KEY: ${BDNA_S3_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-}}
+  BDNA_STORAGE_LOCAL_ROOT: /app/var/storage
+  BDNA_PUBLIC_BASE_URL: ${BDNA_PUBLIC_BASE_URL:-http://localhost:8080}
+  BDNA_MCP_PUBLIC_URL: ${BDNA_MCP_PUBLIC_URL:-http://localhost:8080}
+  BDNA_CORS_ORIGINS: '${BDNA_CORS_ORIGINS:-["http://localhost:8080"]}'
+
+x-backend: &backend
+  build:
+    context: ./backend
+    args:
+      WITH_DOCLING: ${BDNA_WITH_DOCLING:-0}
+  image: brand-dna/backend:${BDNA_IMAGE_TAG:-latest}
+  env_file:
+    - path: .env
+      required: false
+  environment: *backend-env
+  volumes:
+    - storage:/app/var/storage # used only when BDNA_STORAGE_BACKEND=local
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      BDNA_DB_NAME: ${BDNA_DB_NAME:-bdna}
+      BDNA_DB_OWNER_PASSWORD: ${BDNA_DB_OWNER_PASSWORD:?set BDNA_DB_OWNER_PASSWORD in .env}
+      BDNA_DB_APP_PASSWORD: ${BDNA_DB_APP_PASSWORD:?set BDNA_DB_APP_PASSWORD in .env}
+      BDNA_DB_SYSTEM_PASSWORD: ${BDNA_DB_SYSTEM_PASSWORD:?set BDNA_DB_SYSTEM_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${BDNA_DB_NAME:-bdna}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bdna}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - minio:/data
+    ports:
+      # Signed download URLs point here (BDNA_S3_PUBLIC_ENDPOINT_URL). Put it behind TLS in production.
+      - "${BDNA_MINIO_PORT:-9000}:9000"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "local/$${BDNA_S3_BUCKET}" &&
+        mc anonymous set none "local/$${BDNA_S3_BUCKET}" &&
+        echo "bucket $${BDNA_S3_BUCKET} ready (private)"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bdna}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      BDNA_S3_BUCKET: ${BDNA_S3_BUCKET:-bdna-assets}
+    restart: "no"
+
+  migrate:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      BDNA_DATABASE_OWNER_URL: postgresql+psycopg://bdna_owner:${BDNA_DB_OWNER_PASSWORD}@postgres:5432/${BDNA_DB_NAME:-bdna}
+    # Migrations, then the isolation self-check (RLS forced on every tenant table, app role cannot bypass it).
+    command: ["sh", "-c", "python -m app.cli migrate && python -m app.cli check"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.cli", "worker"]
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+
+  mcp:
+    <<: *backend
+    command: ["python", "-m", "app.mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8001"]
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        BDNA_API_INTERNAL_URL: http://api:8000
+    image: brand-dna/web:${BDNA_IMAGE_TAG:-latest}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.10-alpine
+    environment:
+      BDNA_SITE_ADDRESS: ${BDNA_SITE_ADDRESS:-:80}
+    ports:
+      - "${BDNA_HTTP_PORT:-8080}:80"
+      - "${BDNA_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - web
+      - api
+      - mcp
+    restart: unless-stopped
+
+  # --- optional -----------------------------------------------------------------------------
+  n8n:
+    profiles: ["automation"]
+    image: n8nio/n8n:1.95.3
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY to use the automation profile}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      # Brand DNA API, reachable from n8n inside the Compose network
+      BDNA_API_URL: http://api:8000
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n:/home/node/.n8n
+      - ./n8n:/workflows:ro
+    restart: unless-stopped
+
+  demo-seed:
+    profiles: ["demo"]
+    <<: *backend
+    environment:
+      <<: *backend-env
+      BDNA_ENVIRONMENT: development
+    command: ["python", "-m", "app.cli", "seed-demo", "--admin-email", "${BDNA_DEMO_ADMIN_EMAIL:-admin@platform.local}", "--admin-password", "${BDNA_DEMO_ADMIN_PASSWORD:-admin-password-2026}"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+volumes:
+  pgdata:
+  minio:
+  storage:
+  caddy-data:
+  n8n:

@@ -18,6 +18,7 @@ from app.services import embeddings as emb
 from app.services import ingest
 from app.storage.backends import TenantStorage, backend
 
+
 @handler("asset.ingest")
 def asset_ingest(ctx: JobContext) -> dict[str, Any]:
     p = ctx.job.payload or {}

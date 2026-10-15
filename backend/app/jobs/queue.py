@@ -205,6 +205,15 @@ def handler(job_type: str):
     return deco
 
 
+def public_error(error: str | None) -> str | None:
+    """What a workspace user may see of a job failure: the exception line only. Stack traces (server
+    paths, library internals) stay in the database and the logs for platform operators."""
+    if not error:
+        return None
+    first = error.strip().split("\n", 1)[0].strip()
+    return first[:500] or None
+
+
 def run_job(job: ClaimedJob) -> str:
     from app.jobs import handlers  # noqa: F401  (registers handlers)
 

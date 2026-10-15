@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 
 from app.api.common import slugify
-from app.api.errors import Conflict, Unauthorized, ValidationFailed
+from app.api.errors import Conflict, TooManyRequests, Unauthorized, ValidationFailed
 from app.config import get_settings
 from app.db.session import system_session
 from app.models import (
@@ -37,25 +37,41 @@ class LoginResult:
     user: dict[str, Any]
 
 
+def _throttle(s, email: str, ip: str | None, now: dt.datetime, cfg) -> None:  # noqa: ANN001
+    """Refuse further attempts after too many recent failures for this e-mail or this IP. Counting
+    uses the audit log, so throttling works across API processes without extra infrastructure."""
+    since = now - dt.timedelta(minutes=cfg.login_window_minutes)
+    base = select(func.count()).select_from(AuditLog).where(AuditLog.action == "auth.login_failed", AuditLog.created_at >= since)
+    by_email = s.scalar(base.where(func.lower(AuditLog.actor_label) == email.strip().lower()[:320])) or 0
+    by_ip = s.scalar(base.where(AuditLog.ip_address == ip)) if ip else 0
+    if by_email >= cfg.login_max_failures_per_email or (by_ip or 0) >= cfg.login_max_failures_per_ip:
+        raise TooManyRequests(f"Too many failed sign-in attempts. Try again in {cfg.login_window_minutes} minutes.",
+                              details={"retry_after_seconds": cfg.login_window_minutes * 60})
+
+
 def login(email: str, password: str, ip: str | None, user_agent: str | None) -> LoginResult:
     now = dt.datetime.now(dt.UTC)
+    cfg = get_settings()
+    result: LoginResult | None = None
     with system_session() as s:
+        _throttle(s, email, ip, now, cfg)
         user = s.scalar(select(User).where(func.lower(User.email) == email.strip().lower()))
         ok = verify_password(user.password_hash if user else None, password)
-        if not user or not ok or not user.is_active:
-            s.add(AuditLog(actor_type="user", actor_label=email[:320], action="auth.login_failed", ip_address=ip))
-            raise Unauthorized("Invalid email or password")
-        expires = now + dt.timedelta(hours=get_settings().session_ttl_hours)
-        sess = AuthSession(user_id=user.id, expires_at=expires, ip_address=ip, user_agent=(user_agent or "")[:400])
-        s.add(sess)
-        user.last_login_at = now
-        s.flush()
-        s.add(
-            AuditLog(
-                actor_user_id=user.id, actor_type="user", actor_label=user.email, action="auth.login", ip_address=ip
-            )
-        )
-        return LoginResult(issue_session_jwt(user.id, sess.id, expires), expires, user_public(user))
+        if user and ok and user.is_active:
+            expires = now + dt.timedelta(hours=cfg.session_ttl_hours)
+            sess = AuthSession(user_id=user.id, expires_at=expires, ip_address=ip, user_agent=(user_agent or "")[:400])
+            s.add(sess)
+            user.last_login_at = now
+            s.flush()
+            s.add(AuditLog(actor_user_id=user.id, actor_type="user", actor_label=user.email, action="auth.login", ip_address=ip))
+            result = LoginResult(issue_session_jwt(user.id, sess.id, expires), expires, user_public(user))
+    if result is None:
+        # Recorded in its own committed transaction (raising inside the session would roll it back);
+        # these rows drive sign-in throttling and appear in the platform activity log.
+        with system_session() as s:
+            s.add(AuditLog(actor_type="user", actor_label=email.strip().lower()[:320], action="auth.login_failed", ip_address=ip))
+        raise Unauthorized("Invalid email or password")
+    return result
 
 
 def revoke_session(session_id: uuid.UUID) -> None:

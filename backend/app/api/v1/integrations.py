@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import uuid
 from typing import Any
 
@@ -14,9 +15,11 @@ from app.ai.prompts import DEFAULTS
 from app.api.common import row_to_dict
 from app.api.deps import TenantDep
 from app.api.errors import NotFound, ValidationFailed
-from app.jobs.queue import enqueue
-from app.models import Integration, PromptTemplate
+from app.config import get_settings
+from app.jobs.queue import enqueue, public_error
+from app.models import Integration, ProcessingJob, PromptTemplate
 from app.security.credentials import encrypt_secret
+from app.security.outbound import OutboundUrlError, check_outbound_url
 from app.services.events import EVENT_TYPES
 
 router = APIRouter(tags=["integrations"])
@@ -39,6 +42,12 @@ class IntegrationIn(BaseModel):
 
 def _validate(body: IntegrationIn) -> None:
     c = body.config
+    for key in ("url", "base_url"):
+        if c.get(key):
+            try:
+                check_outbound_url(str(c[key]))
+            except OutboundUrlError as e:
+                raise ValidationFailed(f"config.{key}: {e}") from e
     if body.kind == "webhook":
         if not str(c.get("url", "")).startswith(("https://", "http://")):
             raise ValidationFailed("webhook config.url must be an http(s) URL")
@@ -52,11 +61,61 @@ def _validate(body: IntegrationIn) -> None:
             raise ValidationFailed("ai_provider config.provider must be anthropic | openai | openai_compatible | dev")
 
 
+@functools.lru_cache(maxsize=1)
+def _mcp_tools() -> tuple[tuple[str, str], ...]:
+    """Tool names and descriptions, read from the MCP server definition itself (never hand-copied)."""
+    try:
+        import asyncio
+
+        from app.mcp.server import build_server
+
+        tools = asyncio.run(build_server().list_tools())
+        return tuple((t.name, t.description or "") for t in tools)
+    except Exception:  # noqa: BLE001 - the MCP package is optional for the REST API
+        return ()
+
+
+def mcp_info() -> dict[str, Any]:
+    """How an external AI client connects to the read-only MCP server. Contains no secrets."""
+    s = get_settings()
+    url = s.mcp_public_url.rstrip("/")
+    return {
+        "transports": ["stdio", "streamable-http"],
+        "http_url": f"{url}/mcp",
+        "stdio_command": "BDNA_MCP_TOKEN=bdna_… python -m app.mcp",
+        "http_command": "python -m app.mcp --transport streamable-http --host 0.0.0.0 --port 8001",
+        "auth": "Each MCP client uses a workspace API token (Authorization: Bearer bdna_…), bound to one customer and optionally one brand.",
+        "read_only": True,
+        "public_base_url": s.public_base_url,
+        "tools": [{"name": n, "description": d} for n, d in _mcp_tools()],
+    }
+
+
 @router.get("/integrations")
 def list_integrations(tenant: TenantDep) -> dict:
     tenant.require("integrations.manage")
     rows = tenant.db.scalars(select(Integration).order_by(Integration.created_at)).all()
-    return {"items": [_out(i) for i in rows], "event_types": EVENT_TYPES, "ai": registry.describe(tenant.db)}
+    return {"items": [_out(i) for i in rows], "event_types": EVENT_TYPES, "ai": registry.describe(tenant.db), "mcp": mcp_info()}
+
+
+@router.get("/integrations/{integration_id}/deliveries")
+def webhook_deliveries(integration_id: uuid.UUID, tenant: TenantDep, limit: int = 20) -> dict:
+    """Recent delivery attempts for one webhook (from the job queue; payload bodies are not returned)."""
+    tenant.require("integrations.manage")
+    i = tenant.db.scalar(select(Integration).where(Integration.id == integration_id))
+    if i is None or i.kind != "webhook":
+        raise NotFound("Webhook not found")
+    jobs = tenant.db.scalars(
+        select(ProcessingJob)
+        .where(ProcessingJob.job_type == "webhook.deliver", ProcessingJob.payload["integration_id"].astext == str(i.id))
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(max(1, min(limit, 100)))
+    ).all()
+    return {"items": [{
+        "job_id": str(j.id), "event": (j.payload or {}).get("event"), "status": j.status, "attempts": j.attempts,
+        "max_attempts": j.max_attempts, "status_code": (j.result or {}).get("status_code"), "error": public_error(j.error),
+        "created_at": j.created_at.isoformat(), "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+    } for j in jobs]}
 
 
 @router.post("/integrations", status_code=201)
@@ -141,3 +200,18 @@ def create_prompt_override(body: PromptIn, tenant: TenantDep) -> dict:
     tenant.db.flush()
     tenant.audit("prompt.created", "prompt_template", p.id, {"key": p.key, "version": p.version})
     return row_to_dict(p)
+
+
+@router.post("/prompts/{key}/reset")
+def reset_prompt_override(key: str, tenant: TenantDep) -> dict:
+    """Go back to the platform default prompt. Override versions are kept (inactive) for provenance."""
+    tenant.require("integrations.manage")
+    if key not in [d[0] for d in DEFAULTS]:
+        raise NotFound("Unknown prompt key")
+    n = 0
+    for old in tenant.db.scalars(select(PromptTemplate).where(PromptTemplate.key == key, PromptTemplate.organization_id == tenant.org_id,
+                                                               PromptTemplate.is_active.is_(True))):
+        old.is_active = False
+        n += 1
+    tenant.audit("prompt.reset", "prompt_template", None, {"key": key, "deactivated": n})
+    return {"key": key, "deactivated": n}

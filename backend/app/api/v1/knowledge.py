@@ -325,7 +325,22 @@ def delete_relationship(rel_id: uuid.UUID, tenant: TenantDep) -> None:
 def graph(brand_id: uuid.UUID, tenant: TenantDep, include_suggested: bool = False) -> dict:
     tenant.require("knowledge.read")
     get_brand_or_404(tenant, brand_id)
-    return brand_graph(tenant.db, brand_id, include_suggested)
+    g = brand_graph(tenant.db, brand_id, include_suggested)
+    # Asset nodes carry a signed thumbnail so the graph can draw them as pictures.
+    aids = [uuid.UUID(n["entity_id"]) for n in g["nodes"] if n["type"] == "asset"]
+    if aids:
+        from app.models import Asset
+        from app.services.assets import load_summaries
+
+        rows = tenant.db.scalars(select(Asset).where(Asset.id.in_(aids), Asset.deleted_at.is_(None))).all()
+        by_id = {s["id"]: s for s in load_summaries(tenant.db, list(rows), tenant.org_id)}
+        for n in g["nodes"]:
+            a = by_id.get(n["entity_id"])
+            if a:
+                n["thumbnail_url"] = a["thumbnail_url"]
+                n["asset_type"] = a["asset_type"]
+                n["reference_role"] = a["reference_role"]
+    return g
 
 
 @router.get("/entities/{entity_type}/{entity_id}/relationships")

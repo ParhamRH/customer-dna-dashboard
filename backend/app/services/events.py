@@ -52,6 +52,13 @@ def deliver(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     if hook is None or hook.status != "active":
         return {"skipped": "integration missing or disabled"}
     url = (hook.config or {}).get("url")
+    from app.jobs.queue import PermanentJobError
+    from app.security.outbound import OutboundUrlError, check_outbound_url
+
+    try:
+        check_outbound_url(url)
+    except OutboundUrlError as e:  # re-checked at delivery: DNS may have changed since saving
+        raise PermanentJobError(f"webhook URL refused: {e}") from e
     body = json.dumps(
         {"id": payload["event_id"], "type": payload["event"], "occurred_at": payload["occurred_at"],
          "organization_id": str(hook.organization_id), "data": payload["data"]},
@@ -61,7 +68,7 @@ def deliver(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     headers = {"content-type": "application/json", "x-bdna-event": payload["event"], "x-bdna-timestamp": ts}
     if hook.secret_encrypted:
         headers["x-bdna-signature"] = "sha256=" + sign(decrypt_secret(hook.secret_encrypted), body, ts)
-    r = httpx.post(url, content=body, headers=headers, timeout=15)
+    r = httpx.post(url, content=body, headers=headers, timeout=15, follow_redirects=False)
     hook.last_event_at = dt.datetime.now(dt.UTC)
     if r.status_code >= 400:
         raise RuntimeError(f"webhook responded {r.status_code}")

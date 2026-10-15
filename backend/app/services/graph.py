@@ -178,9 +178,11 @@ def create_relationship(
 
 
 def brand_graph(db: Session, brand_id: uuid.UUID, include_suggested: bool = False, limit: int = 2000) -> dict[str, Any]:
-    q = select(Relationship).where(Relationship.brand_id == brand_id)
-    if not include_suggested:
-        q = q.where(Relationship.status == "approved")
+    # Rejected relationships never appear; suggested ones only when explicitly requested (and are flagged).
+    q = select(Relationship).where(
+        Relationship.brand_id == brand_id,
+        Relationship.status.in_(("approved", "suggested") if include_suggested else ("approved",)),
+    )
     rels = db.scalars(q.limit(limit)).all()
     refs = {(r.source_type, r.source_id) for r in rels} | {(r.target_type, r.target_id) for r in rels}
     # Always include concepts and approved principles as nodes even when unconnected
@@ -202,6 +204,7 @@ def brand_graph(db: Session, brand_id: uuid.UUID, include_suggested: bool = Fals
             "target": f"{r.target_type}:{r.target_id}",
             "relation_type": r.relation_type,
             "status": r.status,
+            "origin": r.origin,
             "weight": jsonable(r.weight),
         }
         for r in rels

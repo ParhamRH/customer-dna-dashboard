@@ -182,9 +182,10 @@ def test_soft_delete_restore_and_purge(a, client):
 
 
 def test_failed_jobs_can_be_retried(a):
+    import uuid as _uuid
+
     from app.db.session import TenantContext, tenant_session
     from app.jobs.queue import enqueue
-    import uuid as _uuid
 
     with tenant_session(TenantContext(_uuid.UUID(a.org_id))) as db:
         job = enqueue(db, _uuid.UUID(a.org_id), "noop", payload={"fail": True}, max_attempts=1)

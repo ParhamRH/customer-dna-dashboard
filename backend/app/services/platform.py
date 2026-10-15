@@ -20,9 +20,11 @@ from app.models import (
     AssetDerivative,
     AuditLog,
     Brand,
+    ColorToken,
     ExportJob,
     Organization,
     OrganizationUser,
+    Palette,
     ProcessingJob,
 )
 
@@ -73,6 +75,26 @@ def customer_list(search: str | None = None, status: str | None = None) -> list[
         last_act = _per_org(
             s, select(AuditLog.organization_id, func.max(AuditLog.created_at)).group_by(AuditLog.organization_id)
         )
+        # Approved palette swatches (first brand) for the customer list's color strip — display metadata only.
+        swatches: dict[uuid.UUID, list[dict[str, Any]]] = {}
+        first_brand: dict[uuid.UUID, str] = {}
+        for org_id, brand_id in s.execute(
+            select(Brand.organization_id, Brand.id).where(Brand.status == "active").order_by(Brand.created_at)
+        ).all():
+            first_brand.setdefault(org_id, str(brand_id))
+        if orgs:
+            rows = s.execute(
+                select(ColorToken.organization_id, ColorToken.brand_id, ColorToken.hex, ColorToken.name, Palette.role)
+                .join(Palette, Palette.id == ColorToken.palette_id)
+                .where(Palette.status == "approved", ColorToken.organization_id.in_([o.id for o in orgs]))
+                .order_by(Palette.sort_order, Palette.created_at, Palette.id, ColorToken.sort_order)
+            ).all()
+            for org_id, brand_id, hexv, name, role in rows:
+                if str(brand_id) != first_brand.get(org_id):
+                    continue
+                lst = swatches.setdefault(org_id, [])
+                if len(lst) < 16:
+                    lst.append({"hex": hexv, "name": name, "role": role})
         out = []
         for o in orgs:
             out.append(
@@ -93,6 +115,7 @@ def customer_list(search: str | None = None, status: str | None = None) -> list[
                     "storage_quota_bytes": o.storage_quota_bytes,
                     "pending_reviews": pending_an.get(o.id, 0) + pending_sg.get(o.id, 0),
                     "last_activity_at": jsonable(last_act.get(o.id)),
+                    "palette": swatches.get(o.id, []),
                 }
             )
         return out

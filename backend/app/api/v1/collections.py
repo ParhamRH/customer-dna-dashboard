@@ -34,6 +34,16 @@ def _out(tenant, c: Collection, with_assets: bool = False) -> dict:  # noqa: ANN
         if a:
             cover = asset_svc.load_summaries(tenant.db, [a], tenant.org_id)[0]
     d["cover"] = cover
+    if not with_assets:
+        # A few assets for the list view's mosaic (cover first, then collection order).
+        first = tenant.db.scalars(
+            select(Asset)
+            .join(CollectionAsset, CollectionAsset.asset_id == Asset.id)
+            .where(CollectionAsset.collection_id == c.id, Asset.deleted_at.is_(None), Asset.id != c.cover_asset_id)
+            .order_by(CollectionAsset.position)
+            .limit(3 if cover else 4)
+        ).all()
+        d["preview"] = ([cover] if cover else []) + asset_svc.load_summaries(tenant.db, list(first), tenant.org_id)
     if with_assets:
         rows = tenant.db.execute(
             select(Asset, CollectionAsset.note)

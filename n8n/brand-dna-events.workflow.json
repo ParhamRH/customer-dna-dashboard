@@ -1,0 +1,261 @@
+{
+  "name": "Brand DNA \u2014 react to platform events",
+  "nodes": [
+    {
+      "id": "603b6d5b-57cb-4b6b-8ad3-b44cd32108ed",
+      "name": "Brand DNA webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "dfd58a2f-419f-4343-a067-c580d43a8c23",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "brand-dna",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "a8e9d4b0-c5d9-4272-bbe7-a44b2f1fcf29",
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Verify the Brand DNA signature over the exact raw body, then reject stale timestamps.\n// Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto (set in docker-compose.yml) and the webhook's\n// signing secret in the n8n environment as BDNA_WEBHOOK_SECRET.\nconst crypto = require('crypto');\nconst item = $input.first();\nconst headers = item.json.headers || {};\nconst raw = Buffer.from(item.binary.data.data, 'base64').toString('utf8');\nconst secret = $env.BDNA_WEBHOOK_SECRET;\nif (!secret) throw new Error('BDNA_WEBHOOK_SECRET is not set in the n8n environment');\nconst ts = headers['x-bdna-timestamp'];\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(ts + '.' + raw).digest('hex');\nconst given = headers['x-bdna-signature'] || '';\nif (given.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected))) {\n  throw new Error('Invalid Brand DNA signature');\n}\nif (Math.abs(Date.now() / 1000 - Number(ts)) > 300) throw new Error('Stale Brand DNA event (replay protection)');\nconst event = JSON.parse(raw);\nreturn [{ json: event }];"
+      }
+    },
+    {
+      "id": "778151cb-e6bf-4b23-b776-956116f648b9",
+      "name": "Asset processed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        480,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "19c60192-6050-4650-8c20-bd2c2fdc6cee",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "asset.processed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "903ad134-ef5d-4e5c-aa1f-2751f0cca8b3",
+      "name": "Fetch asset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BDNA_API_URL }}/v1/assets/{{ $json.data.asset_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Organization-Id",
+              "value": "={{ $json.organization_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Brand DNA API token"
+        }
+      }
+    },
+    {
+      "id": "d72b701a-fdd5-42d1-822a-30a9729b497c",
+      "name": "Summarise for the team",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Turn the asset detail into a short, honest notification. AI interpretations that nobody has\n// reviewed yet are labelled as such \u2014 they are not official brand knowledge.\nconst a = $input.first().json;\nconst pending = (a.analyses || []).filter((x) => x.status === 'pending_review').length;\nreturn [{ json: {\n  text: `New asset processed: ${a.title} (${a.asset_type}). ` +\n        (pending ? `${pending} AI interpretation(s) waiting for review.` : 'No AI output pending review.'),\n  asset_id: a.id,\n  organization_id: $('Verify signature').first().json.organization_id,\n} }];"
+      }
+    },
+    {
+      "id": "8fcc81e9-50f7-4824-9d1b-ae5b926c7a04",
+      "name": "Version published?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        720,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "3094bc44-67a6-4136-867c-9af35ca10958",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "brand.version_published",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "0c5b33bc-ee7f-4487-9c29-c596cf771d78",
+      "name": "Regenerate website brief",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BDNA_API_URL }}/v1/context/generate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Organization-Id",
+              "value": "={{ $json.organization_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ brand_id: $json.data.brand_id, task_type: 'website_design', mode: 'standard', use_published_version: true, title: 'Website brief \u2014 v' + $json.data.version }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Brand DNA API token"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Brand DNA webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Asset processed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Asset processed?": {
+      "main": [
+        [
+          {
+            "node": "Fetch asset",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Version published?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch asset": {
+      "main": [
+        [
+          {
+            "node": "Summarise for the team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Version published?": {
+      "main": [
+        [
+          {
+            "node": "Regenerate website brief",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    {
+      "name": "brand-dna"
+    }
+  ]
+}

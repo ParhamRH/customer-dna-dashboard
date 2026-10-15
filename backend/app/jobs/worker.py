@@ -56,11 +56,19 @@ def _listener(wake: threading.Event) -> None:
 
 
 def _janitor() -> None:
+    from app.services import maintenance
+
+    ticks = 0
     while not _stop.wait(60):
+        ticks += 1
         try:
             n = requeue_stale()
             if n:
                 log.warning("requeued %d stale jobs", n)
+            if ticks % 10 == 1:  # every ~10 minutes: export expiry, import staging cleanup
+                done = maintenance.run_all()
+                if any(done.values()):
+                    log.info("maintenance: %s", done)
         except Exception:  # noqa: BLE001
             log.exception("janitor failed")
 

@@ -102,6 +102,19 @@ def update_brand(brand_id: uuid.UUID, body: BrandUpdateIn, tenant: TenantDep) ->
     return row_to_dict(brand)
 
 
+@router.post("/{brand_id}/reindex", status_code=202)
+def reindex_brand(brand_id: uuid.UUID, tenant: TenantDep) -> dict:
+    """Rebuild search embeddings for the whole brand, e.g. after changing the embedding provider."""
+    tenant.require("brand.manage")
+    brand = get_brand_or_404(tenant, brand_id)
+    from app.jobs.queue import enqueue
+
+    job = enqueue(tenant.db, tenant.org_id, "brand.reindex", brand_id=brand.id, entity_type="brand", entity_id=brand.id,
+                  created_by=tenant.user_id, priority=90)
+    tenant.audit("brand.reindex_requested", "brand", brand.id)
+    return {"job_id": str(job.id)}
+
+
 def brand_overview(tenant, brand: Brand) -> dict[str, Any]:
     db = tenant.db
 

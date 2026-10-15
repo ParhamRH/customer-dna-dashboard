@@ -1,0 +1,45 @@
+# Reverse proxy in front of the platform. One origin for the browser:
+#   /v1/*, /health      -> FastAPI (uploads stream straight through, no buffering in Next.js)
+#   /docs, /openapi.json -> interactive API reference (OpenAPI)
+#   /mcp, OAuth metadata -> read-only MCP server (Streamable HTTP, bearer API tokens)
+#   everything else      -> Next.js dashboard
+# BDNA_SITE_ADDRESS: ":80" for plain HTTP (local), or a domain such as "brand.example.com" to get
+# automatic HTTPS from Let's Encrypt.
+{
+	admin off
+}
+
+{$BDNA_SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+
+	@api path /v1/* /health /docs /docs/* /redoc /openapi.json
+	handle @api {
+		request_body {
+			max_size 2GB
+		}
+		reverse_proxy api:8000 {
+			flush_interval -1
+			transport http {
+				read_timeout 15m
+				write_timeout 15m
+			}
+		}
+	}
+
+	@mcp path /mcp /mcp/* /.well-known/oauth-protected-resource* /.well-known/oauth-authorization-server*
+	handle @mcp {
+		reverse_proxy mcp:8001 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+}

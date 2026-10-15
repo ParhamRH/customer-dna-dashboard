@@ -21,3 +21,7 @@ frontend/test-results/
 frontend/playwright-report/
 # OS
 .DS_Store
+# Backups (scripts/backup.sh)
+backups/
+# Compose overrides with local secrets
+docker-compose.override.yml

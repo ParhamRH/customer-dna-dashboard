@@ -10,7 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_prefix="BDNA_", extra="ignore")
+    # Later files win: backend/.env (native development) overrides the repository-level .env
+    # (Docker Compose deployment). Real environment variables override both.
+    model_config = SettingsConfigDict(env_file=("../.env", ".env"), env_prefix="BDNA_", extra="ignore")
 
     environment: Literal["development", "test", "production"] = "development"
     secret_key: str = Field("dev-insecure-secret-change-me", min_length=16)
@@ -33,6 +35,10 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 24 * 7
     cookie_name: str = "bdna_session"
     cookie_secure: bool = False
+    # Sign-in throttling: failed attempts within the window, per e-mail address and per client IP.
+    login_window_minutes: int = 15
+    login_max_failures_per_email: int = 8
+    login_max_failures_per_ip: int = 40
     cors_origins: list[str] = ["http://localhost:3000"]
 
     # --- Storage
@@ -43,8 +49,13 @@ class Settings(BaseSettings):
     s3_region: str = "auto"
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
+    # Endpoint browsers use for signed download URLs when it differs from the one the API uses
+    # (e.g. MinIO reached as http://minio:9000 inside Compose but http://localhost:9000 outside).
+    s3_public_endpoint_url: str = ""
+    s3_addressing_style: Literal["auto", "path", "virtual"] = "auto"  # MinIO needs "path"
     signed_url_ttl_seconds: int = 900
     public_base_url: str = "http://localhost:8000"
+    mcp_public_url: str = "http://localhost:8001"  # where external AI clients reach the MCP server (Streamable HTTP)
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GiB
 
     # --- AI providers (provider-independent; see app/ai)
@@ -82,6 +93,11 @@ class Settings(BaseSettings):
     worker_concurrency: int = 2
     job_lock_timeout_seconds: int = 1800
 
+    # --- Outbound requests to customer-supplied URLs (webhooks, AI base URLs)
+    # None = allow private/internal targets only outside production.
+    outbound_allow_private: bool | None = None
+    outbound_allowed_hosts: list[str] = []  # e.g. ["n8n"] for the Compose-internal n8n
+
     # --- Exports
     export_ttl_days: int = 14
 
@@ -93,6 +109,12 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     s = Settings()
-    if s.is_production and s.secret_key.startswith("dev-insecure"):
-        raise RuntimeError("BDNA_SECRET_KEY must be set to a strong secret in production")
+    if s.is_production:
+        problems = []
+        if s.secret_key.startswith(("dev-insecure", "dev-only")) or "CHANGE-ME" in s.secret_key or len(s.secret_key) < 32:
+            problems.append("BDNA_SECRET_KEY must be a random secret of at least 32 characters")
+        if not s.encryption_key or "CHANGE-ME" in s.encryption_key:
+            problems.append("BDNA_ENCRYPTION_KEY must be set (a Fernet key) so integration secrets are encrypted with a dedicated key")
+        if problems:
+            raise RuntimeError("Refusing to start in production: " + "; ".join(problems))
     return s
