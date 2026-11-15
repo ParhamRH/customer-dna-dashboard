@@ -1,5 +1,7 @@
 # Brand DNA & Creative Intelligence Platform
 
+**Website:** [tbioffice.com](https://tbioffice.com) · **Stack:** FastAPI · Next.js · PostgreSQL + pgvector · Docker · MCP
+
 A multi-tenant platform where an agency keeps the **brand DNA** of each customer — foundation,
 visual identity, art direction, aesthetic vocabulary, design and brand language, principles and
 creative material — as governed, searchable knowledge, and turns it into task-specific briefs
@@ -41,8 +43,10 @@ Screenshots show the fictional demo customer "Aurora Atelier".
 
 ## Quick start (Docker Compose)
 
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine with Compose v2).
+
 ```bash
-cp .env.example .env                      # replace every CHANGE-ME
+cp .env.example .env                      # then replace every CHANGE-ME value
 docker compose up -d --build
 docker compose run --rm api python -m app.cli create-admin --email you@agency.example
 open http://localhost:8080
@@ -116,3 +120,7 @@ visual-embedding service) are configuration. See
 [unfinished features](docs/unfinished-features.md) before a production launch — notably
 SSO/MFA, outgoing e-mail, and that Docker images and live AI providers were not exercised in the
 build environment.
+
+## About
+
+Developed for [TBI Office](https://tbioffice.com).
